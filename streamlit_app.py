@@ -211,8 +211,8 @@ def process_snapshot(df):
     # Map source column names → standard names (case-insensitive, partial match)
     col_targets = {
         "Name":     ["name", "hotelname", "hotel_name", "hotel"],
-        "Region":   ["name.1", "region", "searchdestinationid", "search_destination_id",
-                     "searchdestination", "destination", "hermesdestination", "area"],
+        "Region":   ["name.1", "region", "regionname", "region_name", "areaname", "area_name",
+                     "destinationname", "destination_name", "resortname", "resort_name"],
         "Giata":    ["giata"],
         "Stars":    ["starrating", "stars", "star"],
         "Price":    ["cheapestprice", "price"],
@@ -246,7 +246,7 @@ def process_snapshot(df):
     df["Price"] = pd.to_numeric(df["Price"], errors="coerce").fillna(0)
     df = df[df["Price"] > 0].copy()
 
-    df["Giata"] = df["Giata"].astype(str).str.strip()
+    df["Giata"] = df["Giata"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
     df["Stars"] = pd.to_numeric(df["Stars"], errors="coerce").fillna(0).astype(int)
     df["Region"] = df["Region"].astype(str).str.strip()
     df["Name"] = df["Name"].astype(str).str.strip()
@@ -452,7 +452,7 @@ def normalise_offers(df):
         for col in df.columns:
             if col.strip().lower() in [a.lower() for a in aliases] and target not in df.columns:
                 df = df.rename(columns={col: target})
-    df["giata"] = df.get("giata", pd.Series(dtype=str)).astype(str).str.strip()
+    df["giata"] = df.get("giata", pd.Series(dtype=str)).astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
     return df
 
 
@@ -888,26 +888,44 @@ with tab_explorer:
                         if h.get("offer"):
                             exp = h["offer"].get("expiring_soon")
                             badges += f'<span class="badge {"badge-exp" if exp else "badge-offer"}">{"⚡ Expiring" if exp else "Offer"}</span>'
+                        badge_parts = []
+                        if h["seller_tier"] in (1, 2, 3):
+                            badge_parts.append(f'<span class="badge badge-tier{h["seller_tier"]}">Tier {h["seller_tier"]}</span>')
+                        if h["score"] == 5:
+                            badge_parts.append('<span class="badge badge-score5">Exceptional</span>')
+                        elif h["score"] == 4:
+                            badge_parts.append('<span class="badge badge-score4">Good value</span>')
+                        if h.get("offer"):
+                            exp = h["offer"].get("expiring_soon")
+                            badge_parts.append(f'<span class="badge {"badge-exp" if exp else "badge-offer"}">{"⚡ Expiring" if exp else "Offer"}</span>')
+                        badges_html = "".join(badge_parts)
+
                         offer_html = ""
                         if h.get("offer"):
                             exp_cls = "expiring" if h["offer"].get("expiring_soon") else ""
-                            o_type = str(h["offer"].get("type", "")).replace("<", "&lt;").replace(">", "&gt;")
-                            o_summary = str(h["offer"].get("summary", ""))[:100].replace("<", "&lt;").replace(">", "&gt;")
-                            o_bookto = str(h["offer"].get("book_to", "")).replace("<", "&lt;").replace(">", "&gt;")
+                            o_type    = str(h["offer"].get("type",    "")).replace("<","&lt;").replace(">","&gt;")
+                            o_summary = str(h["offer"].get("summary", ""))[:100].replace("<","&lt;").replace(">","&gt;")
+                            o_bookto  = str(h["offer"].get("book_to", "")).replace("<","&lt;").replace(">","&gt;")
                             bookto_html = f"<br><b>Book by: {o_bookto}</b>" if o_bookto else ""
                             offer_html = f'<div class="offer-box {exp_cls}"><b>{o_type}</b><br>{o_summary}{bookto_html}</div>'
-                        h_name = str(h["h"]).replace("<", "&lt;").replace(">", "&gt;")
-                        h_board = str(h["b"]).replace("<", "&lt;").replace(">", "&gt;")
+
+                        h_name  = str(h["h"]).replace("<","&lt;").replace(">","&gt;")
+                        h_board = str(h["b"]).replace("<","&lt;").replace(">","&gt;")
                         stars_str = "★" * min(int(h.get("s", 0)), 5)
-                        st.markdown(f'''<div class="hotel-card {tier_cls} {offer_cls}">
-                            <div style="font-weight:600;font-size:13px;color:#0E2841;margin-bottom:4px">{h_name}</div>
-                            <div style="font-size:18px;font-weight:700;color:#0A7C4E">
-                                £{round(h["p"])} <span style="font-size:11px;color:#8896A8">{h_board}</span>
-                            </div>
-                            <div style="font-size:11px;color:#8896A8">{stars_str} · {h["d"]}</div>
-                            <div style="margin-top:6px">{badges}</div>
-                            {offer_html}
-                        </div>''', unsafe_allow_html=True)
+                        tier_cls  = {1:"tier1",2:"tier2",3:"tier3"}.get(h["seller_tier"],"")
+                        offer_cls = "has-offer" if h.get("offer") else ""
+
+                        st.markdown(
+                            f'<div class="hotel-card {tier_cls} {offer_cls}">'
+                            f'<div style="font-weight:600;font-size:13px;color:#0E2841;margin-bottom:4px">{h_name}</div>'
+                            f'<div style="font-size:18px;font-weight:700;color:#0A7C4E">£{round(h["p"])} '
+                            f'<span style="font-size:11px;color:#8896A8">{h_board}</span></div>'
+                            f'<div style="font-size:11px;color:#8896A8">{stars_str} · {h["d"]}</div>'
+                            f'<div style="margin-top:6px">{badges_html}</div>'
+                            f'{offer_html}'
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
                 if len(hotels) > 12:
                     st.caption(f"+ {len(hotels)-12} more hotels — refine search to see more")
 
