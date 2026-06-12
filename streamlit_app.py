@@ -280,63 +280,82 @@ def process_bookings(df):
     if df is None or df.empty:
         return pd.DataFrame(), dq, None, None
 
-    # Normalise BookedDate
-    df["BookedDate"] = pd.to_datetime(df.get("BookedDate", pd.Series(dtype=str)), errors="coerce")
+    # Strip whitespace from column names
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Flexible column name matching
+    col_aliases = {
+        "BookedDate":   ["bookeddate", "bookdate", "booked_date", "date"],
+        "FolderStatus": ["folderstatus", "status", "folder_status"],
+        "ProdMix":      ["prodmix", "productmix", "prod_mix"],
+        "FolderPax":    ["folderpax", "pax", "folder_pax", "passengers"],
+        "KPIRevenue":   ["kpirevenue", "revenue", "kpi_revenue"],
+        "KPIProfit":    ["kpiprofit", "profit", "kpi_profit"],
+    }
+    rename = {}
+    used = set()
+    for col in df.columns:
+        key = col.lower().replace(" ", "").replace("_", "")
+        for target, aliases in col_aliases.items():
+            if target in used:
+                continue
+            if key in [a.replace("_", "") for a in aliases]:
+                rename[col] = target
+                used.add(target)
+                break
+    df = df.rename(columns=rename)
+
+    # BookedDate
+    if "BookedDate" not in df.columns:
+        dq.append("BookedDate column not found — skipping bookings.")
+        return pd.DataFrame(), dq, None, None
+
+    df["BookedDate"] = pd.to_datetime(df["BookedDate"], errors="coerce")
     df = df.dropna(subset=["BookedDate"])
+    if df.empty:
+        dq.append("No valid BookedDate values found.")
+        return pd.DataFrame(), dq, None, None
 
-    valid_status = {"AUTH", "PROV", "OPS"}
     if "FolderStatus" in df.columns:
-        df = df[df["FolderStatus"].str.upper().isin(valid_status)]
+        df = df[df["FolderStatus"].astype(str).str.upper().isin({"AUTH", "PROV", "OPS"})]
     if "ProdMix" in df.columns:
-        df = df[df["ProdMix"].str.strip().str.lower() == "mixed"]
+        df = df[df["ProdMix"].astype(str).str.strip().str.lower() == "mixed"]
 
-    df["FolderPax"] = pd.to_numeric(df.get("FolderPax", 1), errors="coerce").fillna(0)
+    for col, default in [("FolderPax", 1), ("KPIRevenue", 0), ("KPIProfit", 0)]:
+        if col not in df.columns:
+            df[col] = default
+    df["FolderPax"]  = pd.to_numeric(df["FolderPax"],  errors="coerce").fillna(0)
+    df["KPIRevenue"] = pd.to_numeric(df["KPIRevenue"], errors="coerce").fillna(0)
+    df["KPIProfit"]  = pd.to_numeric(df["KPIProfit"],  errors="coerce").fillna(0)
     df = df[df["FolderPax"] > 0]
-    df["KPIRevenue"] = pd.to_numeric(df.get("KPIRevenue", 0), errors="coerce").fillna(0)
-    df["KPIProfit"] = pd.to_numeric(df.get("KPIProfit", 0), errors="coerce").fillna(0)
-    df["rev_pp"] = df["KPIRevenue"] / df["FolderPax"]
-    df["profit_pp"] = df["KPIProfit"] / df["FolderPax"]
+    df["rev_pp"]    = df["KPIRevenue"] / df["FolderPax"]
+    df["profit_pp"] = df["KPIProfit"]  / df["FolderPax"]
 
-    # Map destination to region
-    unmapped = set()
-    def map_dest(row):
-        dest = str(row.get("HotelNames", "")).strip().lower()
-        # try destination columns
-        for col in ["Destination", "destination", "DestName", "destname"]:
-            if col in row and pd.notna(row[col]):
-                dest_col = str(row[col]).strip().lower()
-                country_col = ""
-                for cc in ["DestCountry", "destcountry", "Country", "country"]:
-                    if cc in row and pd.notna(row[cc]):
-                        country_col = str(row[cc]).strip().lower()
-                        break
-                key = f"{dest_col} - {country_col}" if country_col else dest_col
-                if key in DEST_MAP:
-                    return DEST_MAP[key]
-        return None
-
-    # Build destination key from available columns
-    dest_cols = [c for c in df.columns if "dest" in c.lower() or "destination" in c.lower()]
+    # Find destination + country columns
+    dest_cols    = [c for c in df.columns if "dest" in c.lower() or "destination" in c.lower()]
     country_cols = [c for c in df.columns if "country" in c.lower()]
+    unmapped = set()
 
     if dest_cols:
         dc = dest_cols[0]
         cc = country_cols[0] if country_cols else None
         def make_key(row):
-            d = str(row.get(dc, "")).strip().lower()
-            c = str(row.get(cc, "")).strip().lower() if cc else ""
+            d = str(row[dc]).strip().lower() if pd.notna(row[dc]) else ""
+            c = str(row[cc]).strip().lower() if cc and pd.notna(row[cc]) else ""
             return f"{d} - {c}" if c else d
         df["_dest_key"] = df.apply(make_key, axis=1)
         df["mapped_region"] = df["_dest_key"].map(DEST_MAP)
-        unmapped_keys = df[df["mapped_region"].isna()]["_dest_key"].unique()
-        for k in unmapped_keys[:10]:
-            unmapped.add(k)
+        for k in df[df["mapped_region"].isna()]["_dest_key"].unique()[:10]:
+            if k:
+                unmapped.add(k)
     else:
         df["mapped_region"] = None
+        dq.append("No destination column found in bookings — region mapping skipped.")
 
     if unmapped:
         dq.append(f"Unmapped booking destinations ({len(unmapped)}): {', '.join(list(unmapped)[:5])}{'...' if len(unmapped) > 5 else ''}")
 
+    dq.append(f"Bookings loaded: {len(df)} valid rows.")
     max_date = df["BookedDate"].max().date()
     min_date = (df["BookedDate"].max() - pd.Timedelta(weeks=6)).date()
     return df, dq, min_date, max_date
