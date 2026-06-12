@@ -212,13 +212,15 @@ def process_snapshot(df):
     col_targets = {
         "Name":     ["name", "hotelname", "hotel_name", "hotel"],
         "Region":   ["name.1", "region", "regionname", "region_name", "areaname", "area_name",
-                     "destinationname", "destination_name", "resortname", "resort_name"],
+                     "destinationname", "destination_name", "resortname", "resort_name",
+                     "hermesdestination", "hermes_destination", "searchdestination"],
         "Giata":    ["giata"],
         "Stars":    ["starrating", "stars", "star"],
         "Price":    ["cheapestprice", "price"],
         "Board":    ["cheapestboard", "board", "defaultbbstatic", "default_bb_static"],
         "PriceDate":["cheapestpricedate", "pricedate", "price_date"],
         "Refreshed":["priceslastrefreshed", "refreshed", "lastrefreshed"],
+        "SearchDestId": ["searchdestinationid", "search_destination_id"],
     }
     rename = {}
     used_targets = set()
@@ -232,6 +234,14 @@ def process_snapshot(df):
                 used_targets.add(target)
                 break
     df = df.rename(columns=rename)
+
+    # If Region still not mapped, fall back to SearchDestId (numeric) then to Name
+    if "Region" not in df.columns or df["Region"].astype(str).str.strip().eq("").all():
+        if "SearchDestId" in df.columns:
+            df["Region"] = df["SearchDestId"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+            dq.append("Region mapped from Search Destination Id (numeric). Regions will display as IDs until a text destination column is available.")
+        elif "Name" in df.columns:
+            df["Region"] = "All Hotels"
 
     # Debug: log what columns we ended up with
     dq.append(f"Snapshot columns detected: {', '.join(df.columns.tolist()[:12])}")
@@ -469,8 +479,9 @@ def build_payload(snap_df, region_stats, seller_tiers, offers_df, cache_refreshe
     dq = []
     today_dt = TODAY
 
-    # Build offers lookup by giata
+    # Build offers lookup by GIATA and also by normalised hotel name as fallback
     offers_map = {}
+    offers_name_map = {}  # normalised name -> offer
     unmatched_giatas = 0
     if offers_df is not None and not offers_df.empty:
         offers_df = normalise_offers(offers_df)
@@ -489,7 +500,7 @@ def build_payload(snap_df, region_stats, seller_tiers, offers_df, cache_refreshe
                         "free nights", "transfers", "resort credit"]:
                 if tag.lower() in summary.lower():
                     tags.append(tag)
-            offers_map[g] = {
+            offer_obj = {
                 "summary": summary,
                 "type": str(row.get("type", "")),
                 "tags": tags,
@@ -498,6 +509,13 @@ def build_payload(snap_df, region_stats, seller_tiers, offers_df, cache_refreshe
                 "book_to_date": book_to,
                 "expiring_soon": expiring,
             }
+            if g and g != "nan":
+                offers_map[g] = offer_obj
+            # Also index by normalised hotel name
+            hotel_name = str(row.get("hotel", "")).strip()
+            if hotel_name:
+                norm = re.sub(r"[^\w]", "", hotel_name.lower())
+                offers_name_map[norm] = offer_obj
 
     # Build nested data structure
     data = {}
@@ -537,12 +555,16 @@ def build_payload(snap_df, region_stats, seller_tiers, offers_df, cache_refreshe
 
             score, value_tag = value_score(price, stats)
 
+            # Match offer: GIATA first, then normalised hotel name
             offer = offers_map.get(giata)
+            if not offer:
+                norm_name = re.sub(r"[^\w]", "", name.lower())
+                offer = offers_name_map.get(norm_name)
             if offer:
                 hotels_with_offers += 1
                 offer_out = {k: v for k, v in offer.items() if k != "book_to_date"}
             else:
-                if giata and giata != "nan":
+                if giata and giata != "nan" and offers_map:
                     unmatched_giatas += 1
                 offer_out = None
 
