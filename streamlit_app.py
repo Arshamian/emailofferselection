@@ -204,31 +204,51 @@ def get_macro(region_str):
 
 def process_snapshot(df):
     dq = []
-    # Normalise columns
-    col_map = {
-        "Name": "Name", "Name.1": "Region", "Giata": "Giata",
-        "StarRating": "Stars", "CheapestPrice": "Price",
-        "CheapestBoard": "Board", "CheapestPriceDate": "PriceDate",
-        "PricesLastRefreshed": "Refreshed",
+
+    # Flexible column matching — strip whitespace from all column names first
+    df.columns = [str(c).strip() for c in df.columns]
+
+    # Map source column names → standard names (case-insensitive, partial match)
+    col_targets = {
+        "Name": ["name"],
+        "Region": ["name.1", "region"],
+        "Giata": ["giata"],
+        "Stars": ["starrating", "stars", "star"],
+        "Price": ["cheapestprice", "price"],
+        "Board": ["cheapestboard", "board"],
+        "PriceDate": ["cheapestpricedate", "pricedate"],
+        "Refreshed": ["priceslastrefreshed", "refreshed", "lastrefreshed"],
     }
     rename = {}
-    for src, tgt in col_map.items():
-        for col in df.columns:
-            if col.strip() == src:
-                rename[col] = tgt
+    used_targets = set()
+    for col in df.columns:
+        col_lower = col.lower().replace(" ", "").replace("_", "")
+        for target, aliases in col_targets.items():
+            if target in used_targets:
+                continue
+            if col_lower in [a.replace(".", "").replace("_", "") for a in aliases]:
+                rename[col] = target
+                used_targets.add(target)
+                break
     df = df.rename(columns=rename)
 
-    required = ["Name", "Region", "Price"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        dq.append(f"Missing snapshot columns: {', '.join(missing)}")
+    # Debug: log what columns we ended up with
+    dq.append(f"Snapshot columns detected: {', '.join(df.columns.tolist()[:12])}")
 
-    df["Price"] = pd.to_numeric(df.get("Price", 0), errors="coerce").fillna(0)
+    # Ensure required columns exist
+    for col, default in [("Price", 0), ("Giata", ""), ("Stars", 0),
+                          ("Board", ""), ("PriceDate", ""), ("Region", ""), ("Name", "")]:
+        if col not in df.columns:
+            df[col] = default
+            dq.append(f"Column '{col}' not found — defaulted to '{default}'.")
+
+    df["Price"] = pd.to_numeric(df["Price"], errors="coerce").fillna(0)
     df = df[df["Price"] > 0].copy()
 
-    df["Giata"] = df.get("Giata", "").astype(str).str.strip()
-    df["Stars"] = pd.to_numeric(df.get("Stars", 0), errors="coerce").fillna(0).astype(int)
-    df["Region"] = df.get("Region", "").astype(str).str.strip()
+    df["Giata"] = df["Giata"].astype(str).str.strip()
+    df["Stars"] = pd.to_numeric(df["Stars"], errors="coerce").fillna(0).astype(int)
+    df["Region"] = df["Region"].astype(str).str.strip()
+    df["Name"] = df["Name"].astype(str).str.strip()
     df["Country"] = df["Region"].apply(lambda r: r.split(" - ")[-1] if " - " in r else r)
 
     # Deduplicate
@@ -245,6 +265,11 @@ def process_snapshot(df):
             cache_refreshed = pd.to_datetime(df["Refreshed"], errors="coerce").max().strftime("%d %b %Y")
         except Exception:
             pass
+
+    if len(df) == 0:
+        dq.append("WARNING: No hotels remain after price filtering — check the Price column mapping.")
+    else:
+        dq.append(f"Snapshot loaded: {len(df)} hotels across {df['Region'].nunique()} regions.")
 
     df = df.sort_values(["Region", "Price"])
     return df, dq, cache_refreshed
