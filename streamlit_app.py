@@ -210,14 +210,15 @@ def process_snapshot(df):
 
     # Map source column names → standard names (case-insensitive, partial match)
     col_targets = {
-        "Name": ["name"],
-        "Region": ["name.1", "region"],
-        "Giata": ["giata"],
-        "Stars": ["starrating", "stars", "star"],
-        "Price": ["cheapestprice", "price"],
-        "Board": ["cheapestboard", "board"],
-        "PriceDate": ["cheapestpricedate", "pricedate"],
-        "Refreshed": ["priceslastrefreshed", "refreshed", "lastrefreshed"],
+        "Name":     ["name", "hotelname", "hotel_name", "hotel"],
+        "Region":   ["name.1", "region", "searchdestinationid", "search_destination_id",
+                     "searchdestination", "destination", "hermesdestination", "area"],
+        "Giata":    ["giata"],
+        "Stars":    ["starrating", "stars", "star"],
+        "Price":    ["cheapestprice", "price"],
+        "Board":    ["cheapestboard", "board", "defaultbbstatic", "default_bb_static"],
+        "PriceDate":["cheapestpricedate", "pricedate", "price_date"],
+        "Refreshed":["priceslastrefreshed", "refreshed", "lastrefreshed"],
     }
     rename = {}
     used_targets = set()
@@ -285,12 +286,18 @@ def process_bookings(df):
 
     # Flexible column name matching
     col_aliases = {
-        "BookedDate":   ["bookeddate", "bookdate", "booked_date", "date"],
-        "FolderStatus": ["folderstatus", "status", "folder_status"],
-        "ProdMix":      ["prodmix", "productmix", "prod_mix"],
-        "FolderPax":    ["folderpax", "pax", "folder_pax", "passengers"],
-        "KPIRevenue":   ["kpirevenue", "revenue", "kpi_revenue"],
-        "KPIProfit":    ["kpiprofit", "profit", "kpi_profit"],
+        "BookedDate":   ["bookeddate", "bookdate", "booked_date", "date", "bookingdate",
+                         "booking_date", "createdate", "created_date", "createddate",
+                         "traveldate", "travel_date", "departuredate", "departure_date"],
+        "FolderStatus": ["folderstatus", "status", "folder_status", "bookingstatus", "booking_status"],
+        "ProdMix":      ["prodmix", "productmix", "prod_mix", "product_mix", "type"],
+        "FolderPax":    ["folderpax", "pax", "folder_pax", "passengers", "adults", "totalpax"],
+        "KPIRevenue":   ["kpirevenue", "revenue", "kpi_revenue", "totalrevenue", "total_revenue", "sellingprice"],
+        "KPIProfit":    ["kpiprofit", "profit", "kpi_profit", "totalprofit", "total_profit", "margin"],
+        "HotelName":    ["hotelname", "hotel_name", "hotel", "name", "hotelnames"],
+        "Destination":  ["destination", "destname", "dest_name", "hermesdestination",
+                         "destinationname", "resort", "location"],
+        "DestCountry":  ["destcountry", "dest_country", "country", "countryname"],
     }
     rename = {}
     used = set()
@@ -331,22 +338,24 @@ def process_bookings(df):
     df["rev_pp"]    = df["KPIRevenue"] / df["FolderPax"]
     df["profit_pp"] = df["KPIProfit"]  / df["FolderPax"]
 
-    # Find destination + country columns
-    dest_cols    = [c for c in df.columns if "dest" in c.lower() or "destination" in c.lower()]
-    country_cols = [c for c in df.columns if "country" in c.lower()]
-    unmapped = set()
+    # Find destination + country columns (use renamed cols first, then fallback scan)
+    dest_col  = "Destination" if "Destination" in df.columns else next(
+        (c for c in df.columns if any(x in c.lower() for x in ["dest", "destination", "hermes", "resort", "location"])), None)
+    country_col = "DestCountry" if "DestCountry" in df.columns else next(
+        (c for c in df.columns if "country" in c.lower()), None)
+    hotel_col = "HotelName" if "HotelName" in df.columns else next(
+        (c for c in df.columns if "hotel" in c.lower() or "name" in c.lower()), None)
 
-    if dest_cols:
-        dc = dest_cols[0]
-        cc = country_cols[0] if country_cols else None
+    unmapped = set()
+    if dest_col:
         def make_key(row):
-            d = str(row[dc]).strip().lower() if pd.notna(row[dc]) else ""
-            c = str(row[cc]).strip().lower() if cc and pd.notna(row[cc]) else ""
+            d = str(row[dest_col]).strip().lower() if pd.notna(row.get(dest_col, "")) else ""
+            c = str(row[country_col]).strip().lower() if country_col and pd.notna(row.get(country_col, "")) else ""
             return f"{d} - {c}" if c else d
         df["_dest_key"] = df.apply(make_key, axis=1)
         df["mapped_region"] = df["_dest_key"].map(DEST_MAP)
         for k in df[df["mapped_region"].isna()]["_dest_key"].unique()[:10]:
-            if k:
+            if k and k != " - ":
                 unmapped.add(k)
     else:
         df["mapped_region"] = None
@@ -882,17 +891,20 @@ with tab_explorer:
                         offer_html = ""
                         if h.get("offer"):
                             exp_cls = "expiring" if h["offer"].get("expiring_soon") else ""
-                            offer_html = f'''<div class="offer-box {exp_cls}">
-                                <b>{h["offer"].get("type","")}</b><br>
-                                {h["offer"].get("summary","")[:100]}
-                                {"<br><b>Book by: " + h["offer"]["book_to"] + "</b>" if h["offer"].get("book_to") else ""}
-                            </div>'''
+                            o_type = str(h["offer"].get("type", "")).replace("<", "&lt;").replace(">", "&gt;")
+                            o_summary = str(h["offer"].get("summary", ""))[:100].replace("<", "&lt;").replace(">", "&gt;")
+                            o_bookto = str(h["offer"].get("book_to", "")).replace("<", "&lt;").replace(">", "&gt;")
+                            bookto_html = f"<br><b>Book by: {o_bookto}</b>" if o_bookto else ""
+                            offer_html = f'<div class="offer-box {exp_cls}"><b>{o_type}</b><br>{o_summary}{bookto_html}</div>'
+                        h_name = str(h["h"]).replace("<", "&lt;").replace(">", "&gt;")
+                        h_board = str(h["b"]).replace("<", "&lt;").replace(">", "&gt;")
+                        stars_str = "★" * min(int(h.get("s", 0)), 5)
                         st.markdown(f'''<div class="hotel-card {tier_cls} {offer_cls}">
-                            <div style="font-weight:600;font-size:13px;color:#0E2841;margin-bottom:4px">{h["h"]}</div>
+                            <div style="font-weight:600;font-size:13px;color:#0E2841;margin-bottom:4px">{h_name}</div>
                             <div style="font-size:18px;font-weight:700;color:#0A7C4E">
-                                £{round(h["p"])} <span style="font-size:11px;color:#8896A8">{h["b"]}</span>
+                                £{round(h["p"])} <span style="font-size:11px;color:#8896A8">{h_board}</span>
                             </div>
-                            <div style="font-size:11px;color:#8896A8">{"★"*h["s"]} · {h["d"]}</div>
+                            <div style="font-size:11px;color:#8896A8">{stars_str} · {h["d"]}</div>
                             <div style="margin-top:6px">{badges}</div>
                             {offer_html}
                         </div>''', unsafe_allow_html=True)
