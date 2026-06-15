@@ -211,25 +211,24 @@ def process_snapshot(df):
     # Map source column names → standard names (case-insensitive, partial match)
     col_targets = {
         "Name":     ["name", "hotelname", "hotel_name", "hotel"],
-        "Region":   ["name.1", "region", "regionname", "region_name", "areaname", "area_name",
-                     "destinationname", "destination_name", "resortname", "resort_name",
-                     "hermesdestination", "hermes_destination", "searchdestination"],
+        "Region":   ["destination"],  # "Destination" column = the text region name
+        "SearchDestId": ["destid", "dest_id", "searchdestinationid", "search_destination_id"],
         "Giata":    ["giata"],
-        "Stars":    ["starrating", "stars", "star"],
-        "Price":    ["cheapestprice", "price"],
-        "Board":    ["cheapestboard", "board", "defaultbbstatic", "default_bb_static"],
-        "PriceDate":["cheapestpricedate", "pricedate", "price_date"],
-        "Refreshed":["priceslastrefreshed", "refreshed", "lastrefreshed"],
-        "SearchDestId": ["searchdestinationid", "search_destination_id"],
+        "Stars":    ["starrating", "star rating", "stars", "star"],
+        "Price":    ["cheapestprice", "cheapest price", "price"],
+        "Board":    ["cheapestboard", "cheapest board", "board", "defaultbbstatic", "default_bb_static"],
+        "PriceDate":["cheapestpricedate", "cheapest price date", "pricedate", "price_date"],
+        "Refreshed":["priceslastrefreshed", "prices last refreshed", "refreshed", "lastrefreshed"],
     }
     rename = {}
     used_targets = set()
     for col in df.columns:
-        col_lower = col.lower().replace(" ", "").replace("_", "")
+        col_lower = col.lower().strip().replace(" ", "").replace("_", "").replace("-", "")
         for target, aliases in col_targets.items():
             if target in used_targets:
                 continue
-            if col_lower in [a.replace(".", "").replace("_", "") for a in aliases]:
+            aliases_norm = [a.lower().replace(" ", "").replace("_", "").replace("-", "") for a in aliases]
+            if col_lower in aliases_norm:
                 rename[col] = target
                 used_targets.add(target)
                 break
