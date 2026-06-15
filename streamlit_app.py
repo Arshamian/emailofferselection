@@ -271,7 +271,7 @@ def process_snapshot(df):
     df["Name"] = df["Name"].astype(str).str.strip()
     df["Country"] = df["Region"].apply(lambda r: r.split(" - ")[-1] if " - " in r else r)
 
-    # Deduplicate
+    df = df[df["Region"].str.len() > 0].copy()  # drop rows with no region
     before = len(df)
     df = df.drop_duplicates(subset=["Name", "Region"], keep="first")
     removed = before - len(df)
