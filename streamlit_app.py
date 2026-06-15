@@ -235,11 +235,21 @@ def process_snapshot(df):
                 break
     df = df.rename(columns=rename)
 
-    # If Region still not mapped, fall back to SearchDestId (numeric) then to Name
+    # If Region still not mapped, try to build a text label from SearchDestId + available dest info
     if "Region" not in df.columns or df["Region"].astype(str).str.strip().eq("").all():
         if "SearchDestId" in df.columns:
-            df["Region"] = df["SearchDestId"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-            dq.append("Region mapped from Search Destination Id (numeric). Regions will display as IDs until a text destination column is available.")
+            # Try to find any text destination column in the sheet to pair with the ID
+            text_dest_col = next(
+                (c for c in df.columns if c not in ("SearchDestId", "Name", "Giata", "Price", "Stars", "Board", "PriceDate", "Refreshed")
+                 and df[c].dtype == object and df[c].nunique() > 1 and df[c].nunique() < len(df) * 0.8),
+                None
+            )
+            if text_dest_col:
+                df["Region"] = df[text_dest_col].astype(str).str.strip()
+                dq.append(f"Region mapped from column '{text_dest_col}'.")
+            else:
+                df["Region"] = df["SearchDestId"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+                dq.append("No text region column found — displaying Search Destination Id as region. Consider adding a 'Region' or 'HermesDestination' column to the snapshot.")
         elif "Name" in df.columns:
             df["Region"] = "All Hotels"
 
@@ -325,13 +335,13 @@ def process_bookings(df):
     # BookedDate
     if "BookedDate" not in df.columns:
         dq.append("BookedDate column not found — skipping bookings.")
-        return pd.DataFrame(), dq, None, None
+        return pd.DataFrame(), dq, None, None, {}
 
     df["BookedDate"] = pd.to_datetime(df["BookedDate"], errors="coerce")
     df = df.dropna(subset=["BookedDate"])
     if df.empty:
         dq.append("No valid BookedDate values found.")
-        return pd.DataFrame(), dq, None, None
+        return pd.DataFrame(), dq, None, None, {}
 
     if "FolderStatus" in df.columns:
         df = df[df["FolderStatus"].astype(str).str.upper().isin({"AUTH", "PROV", "OPS"})]
@@ -377,7 +387,19 @@ def process_bookings(df):
     dq.append(f"Bookings loaded: {len(df)} valid rows.")
     max_date = df["BookedDate"].max().date()
     min_date = (df["BookedDate"].max() - pd.Timedelta(weeks=6)).date()
-    return df, dq, min_date, max_date
+
+    # Build SearchDestId → destination name lookup from bookings
+    dest_id_map = {}
+    dest_id_col = next((c for c in df.columns if "searchdest" in c.lower().replace(" ","").replace("_","")), None)
+    dest_name_col = dest_col  # already found above
+    if dest_id_col and dest_name_col:
+        for _, row in df[[dest_id_col, dest_name_col]].drop_duplicates().iterrows():
+            did = str(row[dest_id_col]).strip().replace(".0","")
+            dname = str(row[dest_name_col]).strip()
+            if did and dname and did != "nan" and dname != "nan":
+                dest_id_map[did] = dname
+
+    return df, dq, min_date, max_date, dest_id_map
 
 
 def compute_region_stats(bookings_df, min_date, max_date):
@@ -475,7 +497,7 @@ def parse_offer_date(val):
         return None
 
 
-def build_payload(snap_df, region_stats, seller_tiers, offers_df, cache_refreshed, bm_from, bm_to):
+def build_payload(snap_df, region_stats, seller_tiers, offers_df, cache_refreshed, bm_from, bm_to, dest_id_map=None):
     dq = []
     today_dt = TODAY
 
@@ -521,23 +543,31 @@ def build_payload(snap_df, region_stats, seller_tiers, offers_df, cache_refreshe
     data = {}
     hotels_with_offers = 0
 
+    dest_id_map = dest_id_map or {}
+
     for region in snap_df["Region"].unique():
         rdf = snap_df[snap_df["Region"] == region]
+        # Enrich numeric region ID with text name from bookings dest_id_map
+        region_display = dest_id_map.get(str(region).strip(), None)
+        if region_display:
+            region_label = f"{region_display} ({region})" if str(region).isdigit() else region_display
+        else:
+            region_label = str(region)
         country = rdf["Country"].iloc[0] if len(rdf) else ""
-        macro = get_macro(region)
-        stats = region_stats.get(region, {})
-        rtiers = seller_tiers.get(region, {})
+        macro = get_macro(region_label)
+        stats = region_stats.get(region_label, region_stats.get(region, {}))
+        rtiers = seller_tiers.get(region_label, seller_tiers.get(region, {}))
 
         if macro not in data:
             data[macro] = {}
 
         hotels = []
         for _, row in rdf.iterrows():
-            name = str(row.get("Name", "")).strip()
-            giata = str(row.get("Giata", "")).strip()
-            price = float(row.get("Price", 0))
-            stars = int(row.get("Stars", 0))
-            board = str(row.get("Board", ""))
+            name       = str(row.get("Name", "")).strip()
+            giata      = str(row.get("Giata", "")).strip()
+            price      = float(row.get("Price", 0))
+            stars      = int(row.get("Stars", 0))
+            board      = str(row.get("Board", ""))
             price_date = str(row.get("PriceDate", ""))[:10]
 
             # Seller tier
@@ -569,7 +599,7 @@ def build_payload(snap_df, region_stats, seller_tiers, offers_df, cache_refreshe
                 offer_out = None
 
             hotels.append({
-                "h": name, "giata": giata, "s": stars, "r": region,
+                "h": name, "giata": giata, "s": stars, "r": region_label,
                 "c": country, "p": round(price, 2), "b": board, "d": price_date,
                 "seller_tier": tier, "bookings_total": bkgs_total,
                 "bookings_6w": stats.get("bookings_6w", 0),
@@ -577,7 +607,7 @@ def build_payload(snap_df, region_stats, seller_tiers, offers_df, cache_refreshe
                 "offer": offer_out,
             })
 
-        data[macro][region] = {
+        data[macro][region_label] = {
             "bookings_6w": stats.get("bookings_6w", 0),
             "median_rev_pp": stats.get("median_rev_pp"),
             "avg_rev_pp": stats.get("avg_rev_pp"),
@@ -690,7 +720,9 @@ def build_shortlist(payload):
             result.append({
                 "rank": len(result) + 1,
                 "hotel": h["h"], "region": rname, "country": h["c"],
-                "board": h["b"], "price": h["p"], "median": med,
+                "board": h["b"], "price": h["p"],
+                "price_date": h.get("d", ""),
+                "median": med,
                 "bookings_total": h["bookings_total"],
                 "region_bkgs": reg.get("bookings_6w", 0),
                 "seller_tier": h["seller_tier"], "score": h["score"],
@@ -766,9 +798,10 @@ with tab_upload:
             bm_from = bm_to = None
             bookings_df = pd.DataFrame()
             bk_dq = []
+            dest_id_map = {}
             if bk_file:
                 bk_raw = pd.read_excel(bk_file)
-                bookings_df, bk_dq, bm_from, bm_to = process_bookings(bk_raw)
+                bookings_df, bk_dq, bm_from, bm_to, dest_id_map = process_bookings(bk_raw)
                 progress.progress(45, text=f"Bookings: {len(bookings_df)} rows processed")
             else:
                 bk_dq = ["No bookings file uploaded — seller tiers and benchmarks unavailable."]
@@ -788,7 +821,7 @@ with tab_upload:
             seller_tiers = compute_seller_tiers(bookings_df) if not bookings_df.empty else {}
 
             progress.progress(75, text="Building payload...")
-            payload, build_dq = build_payload(snap_df, region_stats, seller_tiers, offers_df, cache_refreshed, bm_from, bm_to)
+            payload, build_dq = build_payload(snap_df, region_stats, seller_tiers, offers_df, cache_refreshed, bm_from, bm_to, dest_id_map)
 
             progress.progress(88, text="Building shortlist...")
             shortlist = build_shortlist(payload)
@@ -896,7 +929,13 @@ with tab_explorer:
                              (f" · 📈 {rdata['bookings_6w']} bkgs (6w)" if rdata.get('bookings_6w') else "") +
                              (f" · Med £{round(rdata['median_rev_pp'])}" if rdata.get('median_rev_pp') else "")):
                 h_cols = st.columns(3)
-                for i, h in enumerate(hotels[:12]):
+                # Track how many hotels to show per region using session state
+                show_key = f"show_{rname}"
+                if show_key not in st.session_state:
+                    st.session_state[show_key] = 12
+                visible = st.session_state[show_key]
+
+                for i, h in enumerate(hotels[:visible]):
                     with h_cols[i % 3]:
                         tier_cls = {1: "tier1", 2: "tier2", 3: "tier3"}.get(h["seller_tier"], "")
                         offer_cls = "has-offer" if h.get("offer") else ""
@@ -948,8 +987,11 @@ with tab_explorer:
                             f'</div>',
                             unsafe_allow_html=True
                         )
-                if len(hotels) > 12:
-                    st.caption(f"+ {len(hotels)-12} more hotels — refine search to see more")
+                if len(hotels) > visible:
+                    remaining = len(hotels) - visible
+                    if st.button(f"Load {min(12, remaining)} more ({remaining} remaining)", key=f"more_{rname}"):
+                        st.session_state[show_key] += 12
+                        st.rerun()
 
 
 # ── Tab 3: Email Shortlist ────────────────────────────────────────────────────
@@ -971,6 +1013,7 @@ with tab_shortlist:
                 "Region": r["region"],
                 "Board": r["board"],
                 "Price": f"£{round(r['price'])}",
+                "Price Date": r.get("price_date", ""),
                 "Median": f"£{round(r['median'])}" if r.get("median") else "—",
                 "Hist. Bkgs": r["bookings_total"],
                 "Tier": tier_label,
