@@ -367,11 +367,10 @@ def process_bookings(df):
 
     unmapped = set()
     if dest_col:
-        def make_key(row):
-            d = str(row[dest_col]).strip().lower() if pd.notna(row.get(dest_col, "")) else ""
-            c = str(row[country_col]).strip().lower() if country_col and pd.notna(row.get(country_col, "")) else ""
-            return f"{d} - {c}" if c else d
-        df["_dest_key"] = df.apply(make_key, axis=1)
+        df["_dest_key"] = (
+            df[dest_col].astype(str).str.strip().str.lower()
+            + ((" - " + df[country_col].astype(str).str.strip().str.lower()) if country_col else "")
+        )
         df["mapped_region"] = df["_dest_key"].map(DEST_MAP)
         for k in df[df["mapped_region"].isna()]["_dest_key"].unique()[:10]:
             if k and k != " - ":
